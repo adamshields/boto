@@ -1,3 +1,15 @@
+# Create a folder with access credentials
+aws s3api put-object --bucket your-bucket-name --key adam/ --content-length 0 --endpoint-url https://your-hcp-endpoint --no-verify-ssl --aws-access-key-id YOUR_ACCESS_KEY --aws-secret-access-key YOUR_SECRET_KEY
+
+# List bucket contents with access credentials
+aws s3 ls s3://your-bucket-name/ --endpoint-url https://your-hcp-endpoint --no-verify-ssl --aws-access-key-id YOUR_ACCESS_KEY --aws-secret-access-key YOUR_SECRET_KEY
+
+# Delete the empty folder with access credentials
+aws s3api delete-object --bucket your-bucket-name --key adam/ --endpoint-url https://your-hcp-endpoint --no-verify-ssl --aws-access-key-id YOUR_ACCESS_KEY --aws-secret-access-key YOUR_SECRET_KEY
+
+# Delete all contents of a folder recursively with access credentials
+aws s3 rm s3://your-bucket-name/adam/ --recursive --endpoint-url https://your-hcp-endpoint --no-verify-ssl --aws-access-key-id YOUR_ACCESS_KEY --aws-secret-access-key YOUR_SECRET_KEY
+
 # Create a folder
 aws s3api put-object --bucket your-bucket-name --key adam/ --content-length 0 --endpoint-url https://your-hcp-endpoint --no-verify-ssl
 
