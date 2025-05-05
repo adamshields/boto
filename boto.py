@@ -1,3 +1,23 @@
+# Create a folder
+aws s3api put-object --bucket your-bucket-name --key adam/ --content-length 0 --endpoint-url https://your-hcp-endpoint --no-verify-ssl
+
+# List bucket contents
+aws s3 ls s3://your-bucket-name/ --endpoint-url https://your-hcp-endpoint --no-verify-ssl
+
+# Create a test file in the folder
+aws s3api put-object --bucket your-bucket-name --key adam/test.txt --body test.txt --endpoint-url https://your-hcp-endpoint --no-verify-ssl
+
+# List folder contents
+aws s3 ls s3://your-bucket-name/adam/ --endpoint-url https://your-hcp-endpoint --no-verify-ssl
+
+# Delete a single file in the folder
+aws s3api delete-object --bucket your-bucket-name --key adam/test.txt --endpoint-url https://your-hcp-endpoint --no-verify-ssl
+
+# Delete all contents of a folder recursively
+aws s3 rm s3://your-bucket-name/adam/ --recursive --endpoint-url https://your-hcp-endpoint --no-verify-ssl
+
+# Delete the empty folder
+aws s3api delete-object --bucket your-bucket-name --key adam/ --endpoint-url https://your-hcp-endpoint --no-verify-ssl
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file
 import boto3
 from botocore.config import Config
