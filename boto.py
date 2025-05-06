@@ -5,7 +5,7 @@ echo "[INFO] Starting git metadata script"
 echo "[DEBUG] Current directory: $(pwd)"
 
 # Use the EFS git path found in logs
-GIT_CMD="/efs/dist/fsf/git/2.12.2/exec/bin/git"
+GIT_CMD="/"
 echo "[INFO] Using git executable: $GIT_CMD"
 
 # Define output location for Spring Boot resource
