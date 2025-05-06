@@ -3,6 +3,101 @@ set +e
 
 echo "[INFO] Starting git metadata script"
 echo "[DEBUG] Current directory: $(pwd)"
+
+# Use the EFS git path found in logs
+GIT_CMD="/efs/dist/fsf/git/2.12.2/exec/bin/git"
+echo "[INFO] Using git executable: $GIT_CMD"
+
+# Define output location for Spring Boot resource
+OUTPUT="${WORKSPACE}/src/main/resources/git-metadata.json"
+echo "[INFO] Output file will be: $OUTPUT"
+
+# Try to get git data with fallbacks
+COMMIT_HASH=$($GIT_CMD rev-parse HEAD 2>/dev/null || echo "unknown-$(date +%s)")
+BRANCH_NAME=$($GIT_CMD rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${GIT_BRANCH:-unknown}")
+COMMIT_MSG=$($GIT_CMD log -1 --pretty=format:%B 2>/dev/null || echo "unknown")
+COMMITTER_NAME=$($GIT_CMD log -1 --pretty=format:%an 2>/dev/null || echo "unknown")
+COMMITTER_EMAIL=$($GIT_CMD log -1 --pretty=format:%ae 2>/dev/null || echo "unknown")
+COMMIT_DATE=$($GIT_CMD log -1 --pretty=format:%cd 2>/dev/null || echo "unknown")
+LATEST_TAG=$($GIT_CMD describe --tags --abbrev=0 2>/dev/null || echo "none")
+
+# Build timestamp
+BUILD_TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+
+# Escape quotes in text fields
+COMMIT_MSG=$(echo "$COMMIT_MSG" | sed 's/"/\\"/g')
+COMMITTER_NAME=$(echo "$COMMITTER_NAME" | sed 's/"/\\"/g')
+
+# Write JSON
+cat > "$OUTPUT" << EOF
+{
+  "ci_version": "${BUILD_VERSION:-unknown}",
+  "ci_buildNumber": "${BUILD_NUMBER:-unknown}",
+  "ci_buildTimestamp": "$BUILD_TIMESTAMP",
+  "branchName": "$BRANCH_NAME",
+  "commitHash": "$COMMIT_HASH",
+  "commitMessage": "$COMMIT_MSG",
+  "committerName": "$COMMITTER_NAME",
+  "committerEmail": "$COMMITTER_EMAIL",
+  "commitDate": "$COMMIT_DATE",
+  "latestTag": "$LATEST_TAG"
+}
+EOF
+
+# Verify file was created successfully
+echo "[INFO] Verifying file creation:"
+ls -la "$OUTPUT"
+echo "[INFO] File contents:"
+cat "$OUTPUT"
+
+echo "[INFO] Metadata generation completed successfully"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/bin/bash
+set +e
+
+echo "[INFO] Starting git metadata script"
+echo "[DEBUG] Current directory: $(pwd)"
 echo "[DEBUG] WORKSPACE variable: ${WORKSPACE:-'not set'}"
 
 # Use the EFS git path found in logs
