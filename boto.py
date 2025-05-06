@@ -1,4 +1,212 @@
 #!/bin/bash
+# Don't set -e yet so we can continue even with errors
+set +e
+
+echo "[INFO] Starting git metadata script"
+echo "[DEBUG] Current directory: $(pwd)"
+
+# Check if WORKSPACE is defined and try both with and without it
+echo "[DEBUG] WORKSPACE variable is: ${WORKSPACE:-'not set'}"
+
+# Try to find ALL git executables on the system
+echo "[DEBUG] Searching for all git executables..."
+which git
+find / -name git -type f -executable 2>/dev/null | grep -v "/\.git/"
+
+# Check specifically for the EFS git you mentioned
+if [ -x "/efs/path/to/git" ]; then
+  echo "[DEBUG] Found EFS git at /efs/path/to/git"
+else
+  echo "[DEBUG] EFS git not found at /efs/path/to/git - adjust path as needed"
+fi
+
+# First try without changing directory
+echo "[DEBUG] Testing git commands in current directory"
+git rev-parse --is-inside-work-tree || echo "[DEBUG] Not in a git repository currently"
+
+# Then try using workspace
+if [ -n "$WORKSPACE" ]; then
+  echo "[DEBUG] Changing to WORKSPACE: $WORKSPACE"
+  cd "$WORKSPACE"
+  echo "[DEBUG] Now in: $(pwd)"
+  echo "[DEBUG] Testing git in WORKSPACE"
+  git rev-parse --is-inside-work-tree || echo "[DEBUG] WORKSPACE is not a git repository"
+fi
+
+# Try testing both git executables
+SYSTEM_GIT=$(which git 2>/dev/null || echo "/usr/bin/git")
+EFS_GIT="/efs/path/to/git"  # Adjust this path to the one you see
+
+echo "[DEBUG] Testing with system git: $SYSTEM_GIT"
+if [ -x "$SYSTEM_GIT" ]; then
+  $SYSTEM_GIT rev-parse --is-inside-work-tree || echo "[DEBUG] Not a git repo with system git"
+else
+  echo "[DEBUG] System git not found or not executable"
+fi
+
+echo "[DEBUG] Testing with EFS git: $EFS_GIT"
+if [ -x "$EFS_GIT" ]; then
+  $EFS_GIT rev-parse --is-inside-work-tree || echo "[DEBUG] Not a git repo with EFS git"
+else
+  echo "[DEBUG] EFS git not found or not executable"
+fi
+
+# See what git config we have
+echo "[DEBUG] Git config:"
+git config --list || echo "[DEBUG] Could not get git config"
+
+# Look for .git directory
+echo "[DEBUG] Looking for .git directory:"
+find . -name .git -type d -maxdepth 3 || echo "[DEBUG] No .git directory found within 3 levels"
+
+# Now proceed with the actual script, but with more diagnostics
+echo "[INFO] Selecting git executable..."
+if [ -x "$EFS_GIT" ]; then
+  GIT_CMD="$EFS_GIT"
+elif [ -x "$SYSTEM_GIT" ]; then
+  GIT_CMD="$SYSTEM_GIT"
+else
+  echo "[ERROR] No git executable found"
+  exit 1
+fi
+echo "[INFO] Using git executable: $GIT_CMD"
+
+# Create output directory and JSON stub even if git fails
+mkdir -p resources
+OUTPUT="resources/git-metadata.json"
+
+# Try to get git data but with fallbacks
+echo "[INFO] Attempting to retrieve git metadata..."
+COMMIT_HASH=$($GIT_CMD rev-parse HEAD 2>&1) || COMMIT_HASH="unknown-$(date +%s)"
+BRANCH_NAME=$($GIT_CMD rev-parse --abbrev-ref HEAD 2>&1) || BRANCH_NAME="unknown"
+COMMIT_MSG=$($GIT_CMD log -1 --pretty=format:%B 2>&1) || COMMIT_MSG="unknown"
+COMMITTER_NAME=$($GIT_CMD log -1 --pretty=format:%an 2>&1) || COMMITTER_NAME="unknown"
+COMMITTER_EMAIL=$($GIT_CMD log -1 --pretty=format:%ae 2>&1) || COMMITTER_EMAIL="unknown"
+COMMIT_DATE=$($GIT_CMD log -1 --pretty=format:%cd 2>&1) || COMMIT_DATE="unknown"
+LATEST_TAG=$($GIT_CMD describe --tags --abbrev=0 2>/dev/null) || LATEST_TAG="none"
+
+# Build timestamp
+BUILD_TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+
+# Escape quotes in text fields
+COMMIT_MSG=$(echo "$COMMIT_MSG" | sed 's/"/\\"/g')
+COMMITTER_NAME=$(echo "$COMMITTER_NAME" | sed 's/"/\\"/g')
+
+# Write JSON
+echo "[INFO] Writing JSON data to $OUTPUT"
+cat > "$OUTPUT" << EOF
+{
+  "ci_version": "${BUILD_VERSION:-unknown}",
+  "ci_buildNumber": "${BUILD_NUMBER:-unknown}",
+  "ci_buildTimestamp": "$BUILD_TIMESTAMP",
+  "branchName": "$BRANCH_NAME",
+  "commitHash": "$COMMIT_HASH",
+  "commitMessage": "$COMMIT_MSG",
+  "committerName": "$COMMITTER_NAME",
+  "committerEmail": "$COMMITTER_EMAIL",
+  "commitDate": "$COMMIT_DATE",
+  "latestTag": "$LATEST_TAG"
+}
+EOF
+
+echo "[INFO] Script completed. Check debug output above for clues."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/bin/bash
 set -e
 
 echo "[INFO] Starting git metadata script"
