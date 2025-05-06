@@ -2,6 +2,407 @@
 set +e
 
 echo "[INFO] Starting git metadata script"
+
+# Use the EFS git path found in logs
+GIT_CMD="bin/git"
+echo "[INFO] Using git executable: $GIT_CMD"
+
+# Create output directory in WORKSPACE
+mkdir -p "${WORKSPACE}/resources"
+OUTPUT="${WORKSPACE}/resources/git-metadata.json"
+echo "[INFO] Output file will be: $OUTPUT"
+
+# Try to get git data with fallbacks
+COMMIT_HASH=$($GIT_CMD rev-parse HEAD 2>/dev/null || echo "unknown-$(date +%s)")
+BRANCH_NAME=$($GIT_CMD rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${GIT_BRANCH:-unknown}")
+COMMIT_MSG=$($GIT_CMD log -1 --pretty=format:%B 2>/dev/null || echo "unknown")
+COMMITTER_NAME=$($GIT_CMD log -1 --pretty=format:%an 2>/dev/null || echo "unknown")
+COMMITTER_EMAIL=$($GIT_CMD log -1 --pretty=format:%ae 2>/dev/null || echo "unknown")
+COMMIT_DATE=$($GIT_CMD log -1 --pretty=format:%cd 2>/dev/null || echo "unknown")
+LATEST_TAG=$($GIT_CMD describe --tags --abbrev=0 2>/dev/null || echo "none")
+
+# Build timestamp
+BUILD_TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+
+# Escape quotes in text fields
+COMMIT_MSG=$(echo "$COMMIT_MSG" | sed 's/"/\\"/g')
+COMMITTER_NAME=$(echo "$COMMITTER_NAME" | sed 's/"/\\"/g')
+
+# Write JSON
+cat > "$OUTPUT" << EOF
+{
+  "ci_version": "${BUILD_VERSION:-unknown}",
+  "ci_buildNumber": "${BUILD_NUMBER:-unknown}",
+  "ci_buildTimestamp": "$BUILD_TIMESTAMP",
+  "branchName": "$BRANCH_NAME",
+  "commitHash": "$COMMIT_HASH",
+  "commitMessage": "$COMMIT_MSG",
+  "committerName": "$COMMITTER_NAME",
+  "committerEmail": "$COMMITTER_EMAIL",
+  "commitDate": "$COMMIT_DATE",
+  "latestTag": "$LATEST_TAG"
+}
+EOF
+
+echo "[INFO] Metadata generation completed successfully"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/bin/bash
+set +e
+
+echo "[INFO] Starting git metadata script"
+echo "[DEBUG] Current directory: $(pwd)"
+echo "[DEBUG] WORKSPACE variable is: ${WORKSPACE:-'not set'}"
+
+# Directly use the EFS git path from your logs
+GIT_CMD="/bin/git"
+echo "[INFO] Using explicit git executable: $GIT_CMD"
+
+# Check if the git command exists
+if [ ! -x "$GIT_CMD" ]; then
+  echo "[ERROR] Git executable not found at $GIT_CMD"
+  GIT_CMD=$(which git)
+  echo "[INFO] Falling back to system git: $GIT_CMD"
+fi
+
+# Create output directory in WORKSPACE - note we're not changing directory
+echo "[INFO] Creating resources directory in WORKSPACE"
+mkdir -p "${WORKSPACE}/resources"
+if [ $? -eq 0 ]; then
+  echo "[DEBUG] Resources directory created or already exists"
+else
+  echo "[ERROR] Failed to create resources directory"
+  exit 1
+fi
+
+OUTPUT="${WORKSPACE}/resources/git-metadata.json"
+echo "[INFO] Output file will be: $OUTPUT"
+
+# Look for Jenkins environment variables that might contain Git info
+echo "[DEBUG] Checking Jenkins environment variables for Git info:"
+echo "GIT_COMMIT: ${GIT_COMMIT:-not set}"
+echo "GIT_BRANCH: ${GIT_BRANCH:-not set}"
+
+# Try to get values from environment variables first, then fall back to git commands
+echo "[INFO] Collecting git metadata..."
+
+# Commit hash
+if [ -n "$GIT_COMMIT" ]; then
+  COMMIT_HASH="$GIT_COMMIT"
+  echo "[DEBUG] Using GIT_COMMIT environment variable: $COMMIT_HASH"
+else
+  echo "[DEBUG] Trying git command for commit hash..."
+  COMMIT_HASH=$($GIT_CMD rev-parse HEAD 2>&1) 
+  if [[ $? -ne 0 ]]; then
+    echo "[DEBUG] Failed to get commit hash, using fallback"
+    COMMIT_HASH="unknown-$(date +%s)"
+  else
+    echo "[DEBUG] Successfully retrieved commit hash: $COMMIT_HASH"
+  fi
+fi
+
+# Branch name
+if [ -n "$GIT_BRANCH" ]; then
+  BRANCH_NAME="$GIT_BRANCH"
+  echo "[DEBUG] Using GIT_BRANCH environment variable: $BRANCH_NAME"
+else
+  echo "[DEBUG] Trying git command for branch name..."
+  BRANCH_NAME=$($GIT_CMD rev-parse --abbrev-ref HEAD 2>&1)
+  if [[ $? -ne 0 ]]; then
+    echo "[DEBUG] Failed to get branch name, using fallback"
+    BRANCH_NAME="unknown"
+  else
+    echo "[DEBUG] Successfully retrieved branch name: $BRANCH_NAME"
+  fi
+fi
+
+# Commit message
+echo "[DEBUG] Trying git command for commit message..."
+COMMIT_MSG=$($GIT_CMD log -1 --pretty=format:%B 2>&1)
+if [[ $? -ne 0 ]]; then
+  echo "[DEBUG] Failed to get commit message, using fallback"
+  COMMIT_MSG="unknown"
+else
+  echo "[DEBUG] Successfully retrieved commit message"
+fi
+
+# Committer name
+echo "[DEBUG] Trying git command for committer name..."
+COMMITTER_NAME=$($GIT_CMD log -1 --pretty=format:%an 2>&1)
+if [[ $? -ne 0 ]]; then
+  echo "[DEBUG] Failed to get committer name, using fallback"
+  COMMITTER_NAME="unknown"
+else
+  echo "[DEBUG] Successfully retrieved committer name: $COMMITTER_NAME"
+fi
+
+# Committer email
+echo "[DEBUG] Trying git command for committer email..."
+COMMITTER_EMAIL=$($GIT_CMD log -1 --pretty=format:%ae 2>&1)
+if [[ $? -ne 0 ]]; then
+  echo "[DEBUG] Failed to get committer email, using fallback"
+  COMMITTER_EMAIL="unknown"
+else
+  echo "[DEBUG] Successfully retrieved committer email"
+fi
+
+# Commit date
+echo "[DEBUG] Trying git command for commit date..."
+COMMIT_DATE=$($GIT_CMD log -1 --pretty=format:%cd 2>&1)
+if [[ $? -ne 0 ]]; then
+  echo "[DEBUG] Failed to get commit date, using fallback"
+  COMMIT_DATE="unknown"
+else
+  echo "[DEBUG] Successfully retrieved commit date"
+fi
+
+# Latest tag
+echo "[DEBUG] Trying git command for latest tag..."
+LATEST_TAG=$($GIT_CMD describe --tags --abbrev=0 2>/dev/null)
+if [[ $? -ne 0 ]]; then
+  echo "[DEBUG] Failed to get latest tag, using fallback"
+  LATEST_TAG="none"
+else
+  echo "[DEBUG] Successfully retrieved latest tag: $LATEST_TAG"
+fi
+
+# Build timestamp
+BUILD_TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+echo "[DEBUG] Build timestamp: $BUILD_TIMESTAMP"
+
+# Escape quotes in text fields
+echo "[DEBUG] Escaping special characters in strings"
+COMMIT_MSG=$(echo "$COMMIT_MSG" | sed 's/"/\\"/g')
+COMMITTER_NAME=$(echo "$COMMITTER_NAME" | sed 's/"/\\"/g')
+
+# Write JSON - always using the full WORKSPACE path
+echo "[INFO] Writing JSON data to $OUTPUT"
+cat > "$OUTPUT" << EOF
+{
+  "ci_version": "${BUILD_VERSION:-unknown}",
+  "ci_buildNumber": "${BUILD_NUMBER:-unknown}",
+  "ci_buildTimestamp": "$BUILD_TIMESTAMP",
+  "branchName": "$BRANCH_NAME",
+  "commitHash": "$COMMIT_HASH",
+  "commitMessage": "$COMMIT_MSG",
+  "committerName": "$COMMITTER_NAME",
+  "committerEmail": "$COMMITTER_EMAIL",
+  "commitDate": "$COMMIT_DATE",
+  "latestTag": "$LATEST_TAG"
+}
+EOF
+
+# Verify JSON was written correctly
+if [ -f "$OUTPUT" ]; then
+  echo "[INFO] JSON file written successfully"
+  echo "[DEBUG] JSON file size: $(wc -c < "$OUTPUT") bytes"
+  echo "[DEBUG] JSON file permissions:"
+  ls -la "$OUTPUT"
+else
+  echo "[ERROR] Failed to write JSON file"
+  exit 1
+fi
+
+echo "[INFO] Script completed successfully."
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/bin/bash
+set +e
+
+echo "[INFO] Starting git metadata script"
 echo "[DEBUG] Current directory: $(pwd)"
 echo "[DEBUG] WORKSPACE variable is: ${WORKSPACE:-'not set'}"
 
