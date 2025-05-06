@@ -8,10 +8,10 @@ echo "[DEBUG] Current directory: $(pwd)"
 # Check if WORKSPACE is defined and try both with and without it
 echo "[DEBUG] WORKSPACE variable is: ${WORKSPACE:-'not set'}"
 
-# Try to find ALL git executables on the system
-echo "[DEBUG] Searching for all git executables..."
+# Try to find ALL git executables on the system with timeout
+echo "[DEBUG] Searching for all git executables (60-second timeout)..."
 which git
-find / -name git -type f -executable 2>/dev/null | grep -v "/\.git/"
+timeout 60 find / -name git -type f -executable 2>/dev/null | grep -v "/\.git/" || echo "[DEBUG] Search timed out or no results found"
 
 # Check specifically for the EFS git you mentioned
 if [ -x "/efs/path/to/git" ]; then
@@ -55,9 +55,9 @@ fi
 echo "[DEBUG] Git config:"
 git config --list || echo "[DEBUG] Could not get git config"
 
-# Look for .git directory
-echo "[DEBUG] Looking for .git directory:"
-find . -name .git -type d -maxdepth 3 || echo "[DEBUG] No .git directory found within 3 levels"
+# Look for .git directory with timeout
+echo "[DEBUG] Looking for .git directory (30-second timeout):"
+timeout 30 find . -name .git -type d -maxdepth 3 || echo "[DEBUG] Search timed out or no .git directory found within 3 levels"
 
 # Now proceed with the actual script, but with more diagnostics
 echo "[INFO] Selecting git executable..."
@@ -110,13 +110,6 @@ cat > "$OUTPUT" << EOF
 EOF
 
 echo "[INFO] Script completed. Check debug output above for clues."
-
-
-
-
-
-
-
 
 
 
