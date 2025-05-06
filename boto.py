@@ -1,3 +1,157 @@
+#!/bin/bash
+set -e
+
+echo "[INFO] Starting git metadata script"
+
+# Make sure we're in the workspace
+if [ -n "$WORKSPACE" ]; then
+  cd "$WORKSPACE"
+  echo "[INFO] Changed to workspace: $WORKSPACE"
+fi
+
+# Find git executable with fallbacks
+echo "[INFO] Locating git executable..."
+GIT_CMD=$(which git 2>/dev/null || echo "/efs/path/to/git" || echo "/usr/bin/git")
+if [ ! -x "$GIT_CMD" ]; then
+  echo "[ERROR] Git command not found. Please check git installation."
+  exit 1
+fi
+echo "[INFO] Using git executable: $GIT_CMD"
+
+# Get Git data with error handling
+echo "[INFO] Retrieving git metadata..."
+COMMIT_HASH=$($GIT_CMD rev-parse HEAD 2>&1) || { 
+  echo "[WARNING] Failed to get commit hash"; 
+  COMMIT_HASH="unknown"; 
+}
+
+BRANCH_NAME=$($GIT_CMD rev-parse --abbrev-ref HEAD 2>&1) || { 
+  echo "[WARNING] Failed to get branch name"; 
+  BRANCH_NAME="unknown"; 
+}
+
+COMMIT_MSG=$($GIT_CMD log -1 --pretty=format:%B 2>&1) || { 
+  echo "[WARNING] Failed to get commit message"; 
+  COMMIT_MSG="unknown"; 
+}
+
+COMMITTER_NAME=$($GIT_CMD log -1 --pretty=format:%an 2>&1) || { 
+  echo "[WARNING] Failed to get committer name"; 
+  COMMITTER_NAME="unknown"; 
+}
+
+COMMITTER_EMAIL=$($GIT_CMD log -1 --pretty=format:%ae 2>&1) || { 
+  echo "[WARNING] Failed to get committer email"; 
+  COMMITTER_EMAIL="unknown"; 
+}
+
+COMMIT_DATE=$($GIT_CMD log -1 --pretty=format:%cd 2>&1) || { 
+  echo "[WARNING] Failed to get commit date"; 
+  COMMIT_DATE="unknown"; 
+}
+
+LATEST_TAG=$($GIT_CMD describe --tags --abbrev=0 2>/dev/null) || { 
+  echo "[INFO] No git tags found"; 
+  LATEST_TAG="none"; 
+}
+
+# Build timestamp
+BUILD_TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+
+# Ensure output directory exists
+mkdir -p resources
+OUTPUT="resources/git-metadata.json"
+echo "[INFO] Output file will be: $OUTPUT"
+
+# Escape quotes in text fields
+COMMIT_MSG=$(echo "$COMMIT_MSG" | sed 's/"/\\"/g')
+COMMITTER_NAME=$(echo "$COMMITTER_NAME" | sed 's/"/\\"/g')
+
+# Write JSON
+echo "[INFO] Writing JSON data to output file"
+cat > "$OUTPUT" << EOF
+{
+  "ci_version": "${BUILD_VERSION:-unknown}",
+  "ci_buildNumber": "${BUILD_NUMBER:-unknown}",
+  "ci_buildTimestamp": "$BUILD_TIMESTAMP",
+  "branchName": "$BRANCH_NAME",
+  "commitHash": "$COMMIT_HASH",
+  "commitMessage": "$COMMIT_MSG",
+  "committerName": "$COMMITTER_NAME",
+  "committerEmail": "$COMMITTER_EMAIL",
+  "commitDate": "$COMMIT_DATE",
+  "latestTag": "$LATEST_TAG"
+}
+EOF
+
+echo "[INFO] Metadata generation completed successfully"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Create a folder with access credentials
 aws s3api put-object --bucket your-bucket-name --key adam/ --content-length 0 --endpoint-url https://your-hcp-endpoint --no-verify-ssl --aws-access-key-id YOUR_ACCESS_KEY --aws-secret-access-key YOUR_SECRET_KEY
 
