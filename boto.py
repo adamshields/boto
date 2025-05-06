@@ -1,4 +1,82 @@
 #!/bin/bash
+set +e
+
+echo "[INFO] Starting git metadata script"
+echo "[DEBUG] Current directory: $(pwd)"
+echo "[DEBUG] WORKSPACE variable is: ${WORKSPACE:-'not set'}"
+
+# Directly use your logs
+GIT_CMD="path"
+echo "[INFO] Using explicit git executable: $GIT_CMD"
+
+# Check if the git command exists
+if [ ! -x "$GIT_CMD" ]; then
+  echo "[ERROR] Git executable not found at $GIT_CMD"
+  GIT_CMD=$(which git)
+  echo "[INFO] Falling back to system git: $GIT_CMD"
+fi
+
+# Try to enable Git discovery across filesystem boundaries
+export GIT_DISCOVERY_ACROSS_FILESYSTEM=1
+echo "[DEBUG] Set GIT_DISCOVERY_ACROSS_FILESYSTEM=1 to allow git to look beyond mount points"
+
+# Check if workspace contains a Jenkins checkout
+if [ -n "$WORKSPACE" ]; then
+  cd "$WORKSPACE"
+  echo "[DEBUG] Changed to WORKSPACE: $(pwd)"
+  
+  # Look for common Jenkins checkout indicators
+  if [ -d ".git" ]; then
+    echo "[DEBUG] Found .git directory in WORKSPACE"
+  elif [ -f ".git" ]; then
+    echo "[DEBUG] Found .git file in WORKSPACE (likely a git worktree reference)"
+  else
+    echo "[DEBUG] No direct git repository indicators found in WORKSPACE"
+  fi
+fi
+
+# Create output directory
+mkdir -p resources
+OUTPUT="resources/git-metadata.json"
+
+# Try to get git data but with fallbacks
+echo "[INFO] Attempting to retrieve git metadata..."
+COMMIT_HASH=$($GIT_CMD rev-parse HEAD 2>&1) || COMMIT_HASH="unknown-$(date +%s)"
+BRANCH_NAME=$($GIT_CMD rev-parse --abbrev-ref HEAD 2>&1) || BRANCH_NAME="unknown"
+COMMIT_MSG=$($GIT_CMD log -1 --pretty=format:%B 2>&1) || COMMIT_MSG="unknown"
+COMMITTER_NAME=$($GIT_CMD log -1 --pretty=format:%an 2>&1) || COMMITTER_NAME="unknown"
+COMMITTER_EMAIL=$($GIT_CMD log -1 --pretty=format:%ae 2>&1) || COMMITTER_EMAIL="unknown"
+COMMIT_DATE=$($GIT_CMD log -1 --pretty=format:%cd 2>&1) || COMMIT_DATE="unknown"
+LATEST_TAG=$($GIT_CMD describe --tags --abbrev=0 2>/dev/null) || LATEST_TAG="none"
+
+# Build timestamp
+BUILD_TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+
+# Escape quotes in text fields
+COMMIT_MSG=$(echo "$COMMIT_MSG" | sed 's/"/\\"/g')
+COMMITTER_NAME=$(echo "$COMMITTER_NAME" | sed 's/"/\\"/g')
+
+# Write JSON
+echo "[INFO] Writing JSON data to $OUTPUT"
+cat > "$OUTPUT" << EOF
+{
+  "ci_version": "${BUILD_VERSION:-unknown}",
+  "ci_buildNumber": "${BUILD_NUMBER:-unknown}",
+  "ci_buildTimestamp": "$BUILD_TIMESTAMP",
+  "branchName": "$BRANCH_NAME",
+  "commitHash": "$COMMIT_HASH",
+  "commitMessage": "$COMMIT_MSG",
+  "committerName": "$COMMITTER_NAME",
+  "committerEmail": "$COMMITTER_EMAIL",
+  "commitDate": "$COMMIT_DATE",
+  "latestTag": "$LATEST_TAG"
+}
+EOF
+
+echo "[INFO] Script completed."
+
+
+#!/bin/bash
 # Don't set -e yet so we can continue even with errors
 set +e
 
