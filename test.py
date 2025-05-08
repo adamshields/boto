@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import boto3
 import pymysql
 import urllib.parse
@@ -5,9 +6,13 @@ import urllib3
 import logging
 import argparse
 import csv
+import unicodedata
+import sys
 
-# Disable SSL warnings
+# --- Disable SSL warnings and fix stdout encoding ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # Python 3.7+
+# For older Python: use io.TextIOWrapper fallback if needed
 
 # --- CONFIGURE THESE ---
 DB_HOST = "your-mysql-host"
@@ -24,22 +29,25 @@ ENDPOINT_URL = "https://your-hcp-endpoint.com"
 
 UNMATCHED_OUTPUT = "unmatched_files.csv"
 
-# --- SETUP ARGPARSE ---
-parser = argparse.ArgumentParser(description="Reconcile MySQL table entries with HCP S3 bucket")
-parser.add_argument('--dry-run', action='store_true', help="Perform a dry run without modifying the database")
-parser.add_argument('--log-file', help="Optional path to log file")
+# --- Setup Args ---
+parser = argparse.ArgumentParser(description="Reconcile MySQL entries with HCP S3 bucket")
+parser.add_argument('--dry-run', action='store_true', help="Do not write to DB")
+parser.add_argument('--log-file', help="Write logs to file")
 args = parser.parse_args()
 
-# --- SETUP LOGGING ---
-log_handlers = [logging.StreamHandler()]
+# --- Setup Logging ---
+handlers = [logging.StreamHandler()]
 if args.log_file:
-    log_handlers.append(logging.FileHandler(args.log_file))
+    handlers.append(logging.FileHandler(args.log_file, encoding='utf-8'))
 
-logging.basicConfig(level=logging.INFO, handlers=log_handlers,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=handlers,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger("reconcile")
 
-# Initialize S3 client
+# --- S3 client ---
 s3_client = boto3.client(
     's3',
     aws_access_key_id=ACCESS_KEY,
@@ -48,7 +56,7 @@ s3_client = boto3.client(
     verify=False
 )
 
-# Connect to MySQL
+# --- DB connection ---
 conn = pymysql.connect(
     host=DB_HOST,
     user=DB_USER,
@@ -57,14 +65,20 @@ conn = pymysql.connect(
     cursorclass=pymysql.cursors.DictCursor
 )
 
+# --- Normalize + extract filename ---
 def extract_filename_from_url(url):
     try:
         parsed = urllib.parse.urlparse(url)
         filename = parsed.path.split("/")[-1]
         return urllib.parse.unquote(filename)
     except Exception as e:
-        logger.warning(f"Could not extract filename from {url}: {e}")
+        logger.warning(f"Bad URL {url}: {e}")
         return None
+
+def normalize_filename(name):
+    if not name:
+        return None
+    return unicodedata.normalize("NFC", name).strip()
 
 def s3_object_exists(key):
     try:
@@ -85,10 +99,11 @@ def reconcile():
 
         for row in rows:
             url = row["url"]
-            if not url.startswith("https://server/Artifacts/"):
+            if not url or not url.startswith("https://server/Artifacts/"):
                 continue
 
-            file_name = extract_filename_from_url(url)
+            raw_filename = extract_filename_from_url(url)
+            file_name = normalize_filename(raw_filename)
             if not file_name:
                 continue
 
@@ -96,7 +111,7 @@ def reconcile():
             etag = s3_object_exists(s3_key)
 
             if etag:
-                logger.info(f"Matched: {file_name} → {s3_key} [etag: {etag}]")
+                logger.info(f"[MATCHED] {file_name} → {s3_key}")
                 if not args.dry_run:
                     cursor.execute(
                         f"UPDATE {TABLE_NAME} SET hcp_id = %s, path = %s WHERE id = %s",
@@ -105,7 +120,7 @@ def reconcile():
                     updated += 1
             else:
                 unmatched.append({"id": row["id"], "url": url, "expected_key": s3_key})
-                logger.warning(f"No match in S3 for {file_name}")
+                logger.warning(f"[MISSING] {file_name} not found in S3")
 
         if not args.dry_run:
             conn.commit()
@@ -114,10 +129,12 @@ def reconcile():
         with open(UNMATCHED_OUTPUT, "w", newline='', encoding="utf-8") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=["id", "url", "expected_key"])
             writer.writeheader()
-            writer.writerows(unmatched)
-        logger.info(f"Exported {len(unmatched)} unmatched entries to {UNMATCHED_OUTPUT}")
+            for row in unmatched:
+                row = {k: str(v).encode("utf-8", errors="replace").decode("utf-8") for k, v in row.items()}
+                writer.writerow(row)
+        logger.info(f"Exported {len(unmatched)} unmatched rows to {UNMATCHED_OUTPUT}")
 
-    logger.info(f"Reconciled {updated} files and updated DB. (Dry run: {args.dry_run})")
+    logger.info(f"Updated {updated} rows in DB (dry run: {args.dry_run})")
 
 if __name__ == "__main__":
     try:
