@@ -1,3 +1,62 @@
+def generate_presigned_url(key, expires_in=3600):
+    """Generate a presigned URL for a file in HCP S3"""
+    try:
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': BUCKET_NAME, 'Key': key},
+            ExpiresIn=expires_in
+        )
+        logger.info(f"Generated presigned URL for {key}")
+        print(f"Presigned URL (expires in {expires_in}s):\n{url}")
+        return url
+    except ClientError as e:
+        logger.error(f"Error generating presigned URL for {key}: {e}")
+        return None
+
+def generate_presigned_urls_for_folder(prefix=None, expires_in=3600):
+    """Generate presigned URLs for all files in a folder"""
+    if prefix is None:
+        prefix = TARGET_PREFIX
+
+    if not prefix.endswith('/'):
+        prefix += '/'
+
+    try:
+        paginator = s3_client.get_paginator('list_objects_v2')
+        page_iterator = paginator.paginate(Bucket=BUCKET_NAME, Prefix=prefix)
+
+        count = 0
+        for page in page_iterator:
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    key = obj['Key']
+                    generate_presigned_url(key, expires_in)
+                    count += 1
+        logger.info(f"Generated {count} presigned URLs from folder {prefix}")
+        return count
+    except Exception as e:
+        logger.error(f"Error generating presigned URLs for folder {prefix}: {e}")
+        return 0
+
+
+# Add these to your argument parser block:
+
+    action_group.add_argument('--presign', metavar='KEY', help='Generate a presigned URL for a specific file')
+    action_group.add_argument('--presign-folder', metavar='PREFIX', help='Generate presigned URLs for all files in a folder')
+
+
+# Add these to your command execution block:
+
+    elif args.presign:
+        generate_presigned_url(args.presign)
+
+    elif args.presign_folder:
+        generate_presigned_urls_for_folder(args.presign_folder)
+
+
+
+
+
 # # Create a folder
 # python myscript.py --create-folder
 
