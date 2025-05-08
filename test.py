@@ -1,10 +1,13 @@
-#!/usr/bin/env python3
 import boto3
 import pymysql
 import urllib.parse
+import urllib3
 import logging
 import argparse
 import csv
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURE THESE ---
 DB_HOST = "your-mysql-host"
@@ -57,7 +60,8 @@ conn = pymysql.connect(
 def extract_filename_from_url(url):
     try:
         parsed = urllib.parse.urlparse(url)
-        return parsed.path.split("/")[-1]
+        filename = parsed.path.split("/")[-1]
+        return urllib.parse.unquote(filename)
     except Exception as e:
         logger.warning(f"Could not extract filename from {url}: {e}")
         return None
