@@ -1,3 +1,30 @@
+# # Test migration with 20 files
+# python myscript.py --test
+
+# # Full migration
+# python myscript.py --copy
+
+# # List files (default shows all)
+# python myscript.py --list
+
+# # List only first 10 files
+# python myscript.py --list --limit 10
+
+# # Show statistics
+# python myscript.py --stats
+
+# # Delete everything
+# python myscript.py --clean
+
+# # Delete a specific file
+# python myscript.py --delete-file "new-adam/specific_file.txt"
+
+# # Test with custom number of files
+# python myscript.py --test --limit 5
+
+# # Override source or target
+# python myscript.py --copy --source "Z:/other/path" --target "backup-folder"
+
 #!/usr/bin/env python3
 import os
 import sys
