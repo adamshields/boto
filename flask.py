@@ -1,3 +1,30 @@
+@app.route('/search')
+def search():
+    prefix = request.args.get('prefix', '')
+    query = request.args.get('q', '').lower()
+
+    if prefix and not prefix.endswith('/'):
+        prefix += '/'
+
+    folders, files, _, _, _ = list_files_in_folder(prefix)
+
+    # Filter based on query
+    folders = [f for f in folders if query in f.lower()]
+    files = [f for f in files if query in f.lower()]
+
+    return render_template('partials/file_list.html', folders=folders, files=files, prefix=prefix)
+
+
+
+
+
+
+
+
+
+
+
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
