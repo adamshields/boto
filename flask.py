@@ -43,7 +43,10 @@
   <div class="container">
     <h1 class="mt-4">S3 File and Folder Management</h1>
     <h2>Bucket: {{ bucket_name }}</h2>
-
+    <p class="text-muted">
+        {{ folder_count }} folders — {{ file_count }} files — {{ total_size_hr }} total
+      </p>
+      
     <!-- Breadcrumbs -->
     <nav aria-label="breadcrumb">
       <ol class="breadcrumb">
@@ -158,88 +161,10 @@
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-# file list
-
-<ul class="list-group mt-4">
-    {% for folder in folders %}
-        <li class="list-group-item">
-            <a href="{{ url_for('index', prefix=folder) }}">{{ folder }}</a>
-            <a href="{{ url_for('delete_file_or_folder', key=folder) }}" class="btn btn-danger btn-sm ml-2">Delete</a>
-        </li>
-    {% endfor %}
-    {% for file in files %}
-        <li class="list-group-item">
-            {{ file }}
-            <a href="{{ url_for('edit_file', key=file) }}" class="btn btn-info btn-sm ml-2">Edit</a>
-            <a href="{{ url_for('download_file', key=file) }}" class="btn btn-success btn-sm ml-2">Download</a>
-            <a href="{{ url_for('delete_file_or_folder', key=file) }}" class="btn btn-danger btn-sm ml-2">Delete</a>
-        </li>
-    {% endfor %}
-</ul>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-from flask import Flask, render_template, request, redirect, url_for, flash, send_file
-import boto3
-from botocore.client import Config
-import urllib3
-import random
-import string
-import os
-import time
-
-# Suppress only the single InsecureRequestWarning from urllib3 needed
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# creds
-aws_access_key = ''
-aws_secret_access_key = ''
-endpoint_url = 'https://'
-bucket_name = 'bucket'
-
-# Initialize S3 client
-s3 = boto3.client(
-    's3',
-    aws_access_key_id=aws_access_key,
-    aws_secret_access_key=aws_secret_access_key,
-    endpoint_url=endpoint_url,
-    config=Config(signature_version='s3v4'),
-    verify=False
-)
-
-app = Flask(__name__)
-app.secret_key = 'supersecretkey'
-
-
 def list_files_in_folder(prefix):
     folders = []
     files = []
+    total_size = 0
     continuation_token = None
 
     try:
@@ -249,7 +174,6 @@ def list_files_in_folder(prefix):
                 'Prefix': prefix,
                 'Delimiter': '/'
             }
-
             if continuation_token:
                 params['ContinuationToken'] = continuation_token
 
@@ -259,19 +183,30 @@ def list_files_in_folder(prefix):
                 folders.extend(cp['Prefix'] for cp in response['CommonPrefixes'])
 
             if 'Contents' in response:
-                files.extend(obj['Key'] for obj in response['Contents'] if obj['Key'] != prefix)
+                for obj in response['Contents']:
+                    if obj['Key'] != prefix:
+                        files.append(obj['Key'])
+                        total_size += obj['Size']
 
             if not response.get('IsTruncated'):
                 break
-
             continuation_token = response.get('NextContinuationToken')
 
     except Exception as e:
         flash(f'Error listing files: {e}', 'danger')
 
-    return folders, files
+    return folders, files, len(folders), len(files), total_size
 
 
+
+
+def format_bytes(size):
+    # Converts bytes to KB, MB, GB, etc.
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024:
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} PB"
 
 def generate_random_string(length=10):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
@@ -293,9 +228,20 @@ def get_breadcrumbs(prefix):
 def index(prefix=''):
     if prefix and not prefix.endswith('/'):
         prefix += '/'
-    folders, files = list_files_in_folder(prefix)
+    folders, files, folder_count, file_count, total_size = list_files_in_folder(prefix)
     breadcrumbs = get_breadcrumbs(prefix)
-    return render_template('index.html', folders=folders, files=files, prefix=prefix, breadcrumbs=breadcrumbs, bucket_name=bucket_name)
+    return render_template(
+        'index.html',
+        folders=folders,
+        files=files,
+        prefix=prefix,
+        breadcrumbs=breadcrumbs,
+        bucket_name=bucket_name,
+        file_count=file_count,
+        folder_count=folder_count,
+        total_size_hr=format_bytes(total_size)
+    )
+
 
 
 @app.route('/search')
