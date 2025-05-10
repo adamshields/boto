@@ -130,12 +130,13 @@ def reconcile():
             if etag:
                 logger.info(f"[MATCHED] {file_name} → {s3_key}")
                 if not args.dry_run:
-                    new_url = f"s3://{BUCKET_NAME}/{s3_key}"  # <-- Replace old URL with new s3:// format
+                    new_url = f"{ENDPOINT_URL.rstrip('/')}/{s3_key}"  # COMMENT: use configured HCP endpoint
                     cursor.execute(
                         f"UPDATE {TABLE_NAME} SET hcp_id = %s, path = %s, url = %s WHERE id = %s",
                         (etag, s3_key, new_url, row["id"])
                     )
                     updated += 1
+
             else:
                 unmatched.append({"id": row["id"], "url": url, "expected_key": s3_key})
                 logger.warning(f"[MISSING] {file_name} not found → Raw: {repr(file_name)}")
