@@ -10,7 +10,7 @@ import unicodedata
 import sys
 from difflib import get_close_matches
 
-# Disable SSL warnings and fix console encoding
+# Disable SSL warnings and force UTF-8 output
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
@@ -28,9 +28,9 @@ ENDPOINT_URL = "https://your-hcp-endpoint.com"
 UNMATCHED_OUTPUT = "unmatched_files.csv"
 
 # ARGS
-parser = argparse.ArgumentParser(description="Reconcile MySQL entries with HCP S3 bucket + fuzzy fallback")
-parser.add_argument('--dry-run', action='store_true', help="Do not write to DB")
-parser.add_argument('--log-file', help="Write logs to file")
+parser = argparse.ArgumentParser(description="Reconcile and normalize MySQL entries with HCP S3")
+parser.add_argument('--dry-run', action='store_true', help="Skip DB updates")
+parser.add_argument('--log-file', help="Log file output")
 args = parser.parse_args()
 
 # Logging
@@ -61,8 +61,7 @@ conn = pymysql.connect(
 # Helpers
 def extract_filename_from_url(url):
     try:
-        parsed = urllib.parse.urlparse(url)
-        filename = parsed.path.split("/")[-1]
+        filename = url.split("/")[-1]  # Avoid urlparse to keep # intact
         return urllib.parse.unquote(filename)
     except Exception as e:
         logger.warning(f"Bad URL {url}: {e}")
@@ -88,12 +87,11 @@ def fuzzy_lookup(filename, s3_keys, cutoff=0.85):
     matches = get_close_matches(filename, s3_keys, n=1, cutoff=cutoff)
     return matches[0] if matches else None
 
-# Main
 def reconcile():
     updated = 0
     unmatched = []
 
-    # Fetch all existing S3 keys (filenames only) under legacy/
+    # Cache all object keys from S3 under legacy/
     all_s3_keys = []
     paginator = s3_client.get_paginator('list_objects_v2')
     for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=PREFIX):
@@ -101,7 +99,7 @@ def reconcile():
             obj["Key"].replace(PREFIX, "")
             for obj in page.get("Contents", [])
         ])
-    logger.info(f"Cached {len(all_s3_keys)} files from S3 for fuzzy matching")
+    logger.info(f"Cached {len(all_s3_keys)} S3 keys")
 
     with conn.cursor() as cursor:
         cursor.execute(f"SELECT id, url FROM {TABLE_NAME}")
@@ -121,21 +119,21 @@ def reconcile():
             etag = s3_object_exists(s3_key)
 
             if not etag:
-                # Fuzzy fallback
                 fuzzy_match = fuzzy_lookup(file_name, all_s3_keys)
                 if fuzzy_match:
                     fuzzy_key = normalize_filename(f"{PREFIX}{fuzzy_match}")
                     logger.warning(f"[FUZZY] {file_name} ≈ {fuzzy_match}")
                     etag = s3_object_exists(fuzzy_key)
                     if etag:
-                        s3_key = fuzzy_key  # Use fuzzy match instead
+                        s3_key = fuzzy_key
 
             if etag:
                 logger.info(f"[MATCHED] {file_name} → {s3_key}")
                 if not args.dry_run:
+                    new_url = f"s3://{BUCKET_NAME}/{s3_key}"  # <-- Replace old URL with new s3:// format
                     cursor.execute(
-                        f"UPDATE {TABLE_NAME} SET hcp_id = %s, path = %s WHERE id = %s",
-                        (etag, s3_key, row["id"])
+                        f"UPDATE {TABLE_NAME} SET hcp_id = %s, path = %s, url = %s WHERE id = %s",
+                        (etag, s3_key, new_url, row["id"])
                     )
                     updated += 1
             else:
