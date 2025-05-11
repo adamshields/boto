@@ -1,4 +1,280 @@
 #!/usr/bin/env python3
+import os
+import sys
+import csv
+import time
+import boto3
+import pymysql
+import logging
+import urllib3
+import argparse
+import unicodedata
+from pathlib import Path
+from difflib import get_close_matches
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+# === CONFIGURATION ===
+DB_HOST = "your-mysql-host"
+DB_USER = "your-user"
+DB_PASS = "your-password"
+DB_NAME = "your-db"
+TABLE_NAME = "your-table"
+
+BUCKET_NAME = "adam"
+ENDPOINT_URL = "https://your-hcp-endpoint.com"
+ACCESS_KEY = "your-s3-access-key"
+SECRET_KEY = "your-s3-secret-key"
+
+SOURCE_DIR = "Y:/path/to/share"
+TARGET_PREFIX = "legacy/"
+ORPHAN_CSV = "orphaned_s3_files.csv"
+INSERT_LOG_CSV = "imported_orphan_files.csv"
+UNMATCHED_OUTPUT = "unmatched_files.csv"
+
+# === LOGGING ===
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.FileHandler("s3tool.log"), logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# === S3 + DB ===
+s3 = boto3.client(
+    's3',
+    aws_access_key_id=ACCESS_KEY,
+    aws_secret_access_key=SECRET_KEY,
+    endpoint_url=ENDPOINT_URL,
+    verify=False
+)
+
+db = pymysql.connect(
+    host=DB_HOST,
+    user=DB_USER,
+    password=DB_PASS,
+    database=DB_NAME,
+    cursorclass=pymysql.cursors.DictCursor
+)
+
+# === HELPERS ===
+def normalize_filename(name):
+    if not name:
+        return None
+    return unicodedata.normalize("NFC", name).strip()
+
+def s3_object_exists(key):
+    try:
+        response = s3.head_object(Bucket=BUCKET_NAME, Key=key)
+        return response.get("ETag", "").strip('"')
+    except s3.exceptions.ClientError as e:
+        if e.response['ResponseMetadata']['HTTPStatusCode'] == 404:
+            return None
+        raise
+
+def upload_file(local_path, s3_key):
+    try:
+        with open(local_path, 'rb') as data:
+            response = s3.put_object(
+                Bucket=BUCKET_NAME,
+                Key=s3_key,
+                Body=data
+            )
+        return response.get('ETag', '').strip('"')
+    except Exception as e:
+        logger.error(f"Error uploading {local_path}: {e}")
+        return None
+
+# === MIGRATE FILES ===
+def migrate(args):
+    source_path = Path(SOURCE_DIR)
+    files = [f for f in source_path.iterdir() if f.is_file()]
+    logger.info(f"Starting migration of {len(files)} files")
+    for file_path in files:
+        s3_key = f"{TARGET_PREFIX}{file_path.name}"
+        etag = upload_file(str(file_path), s3_key)
+        if etag:
+            logger.info(f"Uploaded {file_path.name} to {s3_key} [ETag: {etag}]")
+    logger.info("Migration completed.")
+
+# === RECONCILE DB ===
+def reconcile(args):
+    updated = 0
+    unmatched = []
+    all_s3_keys = []
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=TARGET_PREFIX):
+        all_s3_keys.extend([
+            obj["Key"].replace(TARGET_PREFIX, "")
+            for obj in page.get("Contents", [])
+        ])
+
+    with db.cursor() as cursor:
+        cursor.execute(f"SELECT id, url FROM {TABLE_NAME}")
+        rows = cursor.fetchall()
+        for row in rows:
+            url = row["url"]
+            if not url or not url.lower().startswith(("http://server/artifacts/", "https://server/artifacts/")):
+                continue
+            filename = normalize_filename(url.split("/")[-1])
+            s3_key = f"{TARGET_PREFIX}{filename}"
+            etag = s3_object_exists(s3_key)
+            if not etag:
+                match = get_close_matches(filename, all_s3_keys, n=1, cutoff=0.85)
+                if match:
+                    s3_key = f"{TARGET_PREFIX}{match[0]}"
+                    etag = s3_object_exists(s3_key)
+            if etag:
+                new_url = f"{ENDPOINT_URL.rstrip('/')}/{s3_key}"
+                cursor.execute(
+                    f"UPDATE {TABLE_NAME} SET hcp_id = %s, path = %s, url = %s WHERE id = %s",
+                    (etag, s3_key, new_url, row["id"])
+                )
+                updated += 1
+            else:
+                unmatched.append({"id": row["id"], "url": url, "expected_key": s3_key})
+        db.commit()
+
+    with open(UNMATCHED_OUTPUT, "w", newline='', encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=["id", "url", "expected_key"])
+        writer.writeheader()
+        for row in unmatched:
+            writer.writerow(row)
+
+    logger.info(f"Reconciled {updated} rows. Unmatched written to {UNMATCHED_OUTPUT}")
+
+# === FIND ORPHANS ===
+def find_orphans(args):
+    with db.cursor() as cursor:
+        cursor.execute(f"SELECT path FROM {TABLE_NAME} WHERE path IS NOT NULL")
+        db_paths = set(normalize_filename(row['path'].lower()) for row in cursor.fetchall())
+
+    s3_keys = []
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=TARGET_PREFIX):
+        s3_keys.extend(obj["Key"] for obj in page.get("Contents", []))
+
+    orphaned = [k for k in s3_keys if normalize_filename(k.lower()) not in db_paths]
+
+    with open(ORPHAN_CSV, "w", newline='', encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["orphaned_s3_key"])
+        for key in orphaned:
+            writer.writerow([key])
+
+    logger.info(f"Found {len(orphaned)} orphaned S3 files. Wrote to {ORPHAN_CSV}")
+
+# === IMPORT ORPHANS ===
+def import_orphans(args):
+    with open(ORPHAN_CSV, newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        inserted = []
+        with db.cursor() as cursor:
+            for row in reader:
+                key = normalize_filename(row["orphaned_s3_key"])
+                filename = key.split("/")[-1]
+                new_key = f"{TARGET_PREFIX}orphan/{filename}"
+                try:
+                    s3.copy_object(
+                        Bucket=BUCKET_NAME,
+                        CopySource={'Bucket': BUCKET_NAME, 'Key': key},
+                        Key=new_key
+                    )
+                    s3.delete_object(Bucket=BUCKET_NAME, Key=key)
+
+                    new_url = f"{ENDPOINT_URL.rstrip('/')}/{new_key}"
+                    etag = s3.head_object(Bucket=BUCKET_NAME, Key=new_key).get("ETag", "").strip('"')
+
+                    cursor.execute(
+                        f"INSERT INTO {TABLE_NAME} (name, url, path, hcp_id) VALUES (%s, %s, %s, %s)",
+                        (filename, new_url, new_key, etag)
+                    )
+                    inserted.append({"name": filename, "path": new_key, "url": new_url, "hcp_id": etag})
+                except Exception as e:
+                    logger.error(f"Failed to import orphan: {key} → {e}")
+            db.commit()
+
+        with open(INSERT_LOG_CSV, "w", newline='', encoding="utf-8") as out:
+            writer = csv.DictWriter(out, fieldnames=["name", "path", "url", "hcp_id"])
+            writer.writeheader()
+            for row in inserted:
+                writer.writerow(row)
+
+        logger.info(f"Imported {len(inserted)} orphaned files. Log written to {INSERT_LOG_CSV}")
+
+# === MAIN ===
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Unified S3 + DB Migration & Reconciliation Tool")
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("migrate", help="Upload all files from source directory to S3")
+    sub.add_parser("reconcile-db", help="Update DB with hcp_id/path from existing S3 files")
+    sub.add_parser("find-orphans", help="Find S3 files not tracked in DB")
+    sub.add_parser("import-orphans", help="Move orphan files and insert into DB with hcp_id")
+
+    args = parser.parse_args()
+
+    try:
+        if args.command == "migrate":
+            migrate(args)
+        elif args.command == "reconcile-db":
+            reconcile(args)
+        elif args.command == "find-orphans":
+            find_orphans(args)
+        elif args.command == "import-orphans":
+            import_orphans(args)
+        else:
+            parser.print_help()
+    finally:
+        db.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
 import boto3
 import pymysql
 import csv
