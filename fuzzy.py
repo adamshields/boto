@@ -27,20 +27,21 @@ SECRET_KEY = "your-s3-secret-key"
 ENDPOINT_URL = "https://your-hcp-endpoint.com"
 UNMATCHED_OUTPUT = "unmatched_files.csv"
 
-# ARGS
-parser = argparse.ArgumentParser(description="Reconcile and normalize MySQL entries with HCP S3")
+# CLI ARGS
+parser = argparse.ArgumentParser(description="HCP S3 Reconciliation Tool")
 parser.add_argument('--dry-run', action='store_true', help="Skip DB updates")
-parser.add_argument('--log-file', help="Log file output")
+parser.add_argument('--log-file', help="Optional log output file")
+parser.add_argument('--find-orphans', action='store_true', help="Find S3 files not tracked in DB")
 args = parser.parse_args()
 
-# Logging
+# LOGGING
 handlers = [logging.StreamHandler()]
 if args.log_file:
     handlers.append(logging.FileHandler(args.log_file, encoding='utf-8'))
 logging.basicConfig(level=logging.INFO, handlers=handlers, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("reconcile")
 
-# S3 client
+# S3 CLIENT
 s3_client = boto3.client(
     's3',
     aws_access_key_id=ACCESS_KEY,
@@ -49,7 +50,7 @@ s3_client = boto3.client(
     verify=False
 )
 
-# DB
+# MYSQL CONNECTION
 conn = pymysql.connect(
     host=DB_HOST,
     user=DB_USER,
@@ -58,10 +59,10 @@ conn = pymysql.connect(
     cursorclass=pymysql.cursors.DictCursor
 )
 
-# Helpers
+# HELPERS
 def extract_filename_from_url(url):
     try:
-        filename = url.split("/")[-1]  # Avoid urlparse to keep # intact
+        filename = url.split("/")[-1]
         return urllib.parse.unquote(filename)
     except Exception as e:
         logger.warning(f"Bad URL {url}: {e}")
@@ -74,9 +75,7 @@ def normalize_filename(name):
 
 def s3_object_exists(key):
     try:
-        key_bytes = key.encode("utf-8", errors="replace")
-        s3_key_safe = key_bytes.decode("utf-8", errors="replace")
-        response = s3_client.head_object(Bucket=BUCKET_NAME, Key=s3_key_safe)
+        response = s3_client.head_object(Bucket=BUCKET_NAME, Key=key)
         return response.get("ETag", "").strip('"')
     except s3_client.exceptions.ClientError as e:
         if e.response['ResponseMetadata']['HTTPStatusCode'] == 404:
@@ -87,11 +86,35 @@ def fuzzy_lookup(filename, s3_keys, cutoff=0.85):
     matches = get_close_matches(filename, s3_keys, n=1, cutoff=cutoff)
     return matches[0] if matches else None
 
+def find_orphaned_s3_files():
+    logger.info("Checking for orphaned files in S3...")
+
+    with conn.cursor() as cursor:
+        cursor.execute(f"SELECT path FROM {TABLE_NAME} WHERE path IS NOT NULL")
+        db_paths = set(normalize_filename(row['path'].lower()) for row in cursor.fetchall())
+
+    s3_keys = []
+    paginator = s3_client.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=PREFIX):
+        s3_keys.extend(obj["Key"] for obj in page.get("Contents", []))
+
+    orphaned = []
+    for key in s3_keys:
+        if normalize_filename(key.lower()) not in db_paths:
+            orphaned.append(key)
+
+    logger.info(f"Found {len(orphaned)} orphaned S3 files.")
+    with open("orphaned_s3_files.csv", "w", newline='', encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["orphaned_s3_key"])
+        for key in orphaned:
+            writer.writerow([key])
+    logger.info("Wrote orphaned keys to orphaned_s3_files.csv")
+
 def reconcile():
     updated = 0
     unmatched = []
 
-    # Cache all object keys from S3 under legacy/
     all_s3_keys = []
     paginator = s3_client.get_paginator('list_objects_v2')
     for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=PREFIX):
@@ -107,7 +130,7 @@ def reconcile():
 
         for row in rows:
             url = row["url"]
-            if not url or not url.startswith("https://server/Artifacts/"):
+            if not url or not url.lower().startswith(("https://server/artifacts/", "http://server/artifacts/")):
                 continue
 
             raw_filename = extract_filename_from_url(url)
@@ -130,19 +153,18 @@ def reconcile():
             if etag:
                 logger.info(f"[MATCHED] {file_name} → {s3_key}")
                 if not args.dry_run:
-                    new_url = f"{ENDPOINT_URL.rstrip('/')}/{s3_key}"  # COMMENT: use configured HCP endpoint
+                    new_url = f"{ENDPOINT_URL.rstrip('/')}/{s3_key}"
                     cursor.execute(
                         f"UPDATE {TABLE_NAME} SET hcp_id = %s, path = %s, url = %s WHERE id = %s",
                         (etag, s3_key, new_url, row["id"])
                     )
                     updated += 1
-
             else:
                 unmatched.append({"id": row["id"], "url": url, "expected_key": s3_key})
                 logger.warning(f"[MISSING] {file_name} not found → Raw: {repr(file_name)}")
 
-        if not args.dry_run:
-            conn.commit()
+    if not args.dry_run:
+        conn.commit()
 
     if unmatched:
         with open(UNMATCHED_OUTPUT, "w", newline='', encoding="utf-8") as csvfile:
@@ -155,8 +177,12 @@ def reconcile():
 
     logger.info(f"Updated {updated} rows in DB (dry run: {args.dry_run})")
 
+# MAIN
 if __name__ == "__main__":
     try:
-        reconcile()
+        if args.find_orphans:
+            find_orphaned_s3_files()
+        else:
+            reconcile()
     finally:
         conn.close()
