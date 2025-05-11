@@ -1,6 +1,127 @@
 #!/usr/bin/env python3
 import boto3
 import pymysql
+import csv
+import logging
+import urllib3
+import unicodedata
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# CONFIGURATION
+DB_HOST = "your-mysql-host"
+DB_USER = "your-user"
+DB_PASS = "your-password"
+DB_NAME = "your-db"
+TABLE_NAME = "your-table"
+BUCKET_NAME = "adam"
+ENDPOINT_URL = "https://your-hcp-endpoint.com"
+ORPHAN_CSV = "orphaned_s3_files.csv"
+INSERT_LOG_CSV = "imported_orphan_files.csv"
+
+# LOGGING
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("import_orphans")
+
+# CONNECT TO DB
+conn = pymysql.connect(
+    host=DB_HOST,
+    user=DB_USER,
+    password=DB_PASS,
+    database=DB_NAME,
+    cursorclass=pymysql.cursors.DictCursor
+)
+
+# S3 CLIENT
+s3 = boto3.client(
+    's3',
+    aws_access_key_id="your-s3-access-key",
+    aws_secret_access_key="your-s3-secret-key",
+    endpoint_url=ENDPOINT_URL,
+    verify=False
+)
+
+def normalize_filename(name):
+    if not name:
+        return None
+    return unicodedata.normalize("NFC", name).strip()
+
+def move_and_import():
+    with open(ORPHAN_CSV, newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        inserted = []
+
+        with conn.cursor() as cursor:
+            for row in reader:
+                key = normalize_filename(row["orphaned_s3_key"])
+                filename = key.split("/")[-1]
+                new_key = f"legacy/orphan/{filename}"
+
+                try:
+                    # Copy and delete original
+                    s3.copy_object(
+                        Bucket=BUCKET_NAME,
+                        CopySource={'Bucket': BUCKET_NAME, 'Key': key},
+                        Key=new_key
+                    )
+                    s3.delete_object(Bucket=BUCKET_NAME, Key=key)
+
+                    # Insert into DB
+                    hcp_url = f"{ENDPOINT_URL.rstrip('/')}/{new_key}"
+                    cursor.execute(
+                        f"INSERT INTO {TABLE_NAME} (name, url, path) VALUES (%s, %s, %s)",
+                        (filename, hcp_url, new_key)
+                    )
+                    inserted.append({"name": filename, "path": new_key, "url": hcp_url})
+                    logger.info(f"Imported {filename} → {new_key}")
+
+                except Exception as e:
+                    logger.error(f"Failed to move or insert {key}: {e}")
+
+            conn.commit()
+
+        with open(INSERT_LOG_CSV, "w", newline='', encoding="utf-8") as out:
+            writer = csv.DictWriter(out, fieldnames=["name", "path", "url"])
+            writer.writeheader()
+            for row in inserted:
+                writer.writerow(row)
+
+        logger.info(f"Imported {len(inserted)} orphaned files into DB and moved to /legacy/orphan/")
+        logger.info(f"Wrote import log to {INSERT_LOG_CSV}")
+
+if __name__ == "__main__":
+    try:
+        move_and_import()
+    finally:
+        conn.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+import boto3
+import pymysql
 import urllib.parse
 import urllib3
 import logging
