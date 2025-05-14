@@ -1,3 +1,33 @@
+if key == new_key:
+    logger.warning(f"Skipping self-copy for {key}, but checking DB...")
+    try:
+        etag = s3.head_object(Bucket=BUCKET_NAME, Key=new_key).get("ETag", "").strip('"')
+        url_value = filename
+        about_value = "Imported orphaned file (already existed)"
+
+        cursor.execute(
+            f"INSERT INTO {TABLE_NAME} (name, url, path, hcp_id, about) VALUES (%s, %s, %s, %s, %s)",
+            (filename, url_value, new_key, etag, about_value)
+        )
+
+        inserted.append({
+            "name": filename,
+            "path": new_key,
+            "url": url_value,
+            "hcp_id": etag
+        })
+    except Exception as e:
+        logger.error(f"Failed to insert orphan {key} already in /orphan: {e}")
+    continue
+
+
+
+
+
+
+
+
+
 #!/usr/bin/env python3
 import os
 import sys
