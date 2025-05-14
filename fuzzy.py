@@ -11,6 +11,258 @@ import argparse
 import unicodedata
 from pathlib import Path
 from difflib import get_close_matches
+from urllib.parse import unquote
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+# === CONFIGURATION ===
+DB_HOST = "your-mysql-host"
+DB_USER = "your-user"
+DB_PASS = "your-password"
+DB_NAME = "your-db"
+TABLE_NAME = "your-table"
+
+BUCKET_NAME = "adam"
+ENDPOINT_URL = "https://your-hcp-endpoint.com"
+ACCESS_KEY = "your-s3-access-key"
+SECRET_KEY = "your-s3-secret-key"
+
+SOURCE_DIR = "Y:/path/to/share"
+TARGET_PREFIX = "legacy/"
+ORPHAN_CSV = "orphaned_s3_files.csv"
+INSERT_LOG_CSV = "imported_orphan_files.csv"
+UNMATCHED_OUTPUT = "unmatched_files.csv"
+
+# === LOGGING ===
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.FileHandler("s3tool.log"), logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# === S3 + DB ===
+s3 = boto3.client(
+    's3',
+    aws_access_key_id=ACCESS_KEY,
+    aws_secret_access_key=SECRET_KEY,
+    endpoint_url=ENDPOINT_URL,
+    verify=False
+)
+
+db = pymysql.connect(
+    host=DB_HOST,
+    user=DB_USER,
+    password=DB_PASS,
+    database=DB_NAME,
+    cursorclass=pymysql.cursors.DictCursor
+)
+
+# === HELPERS ===
+def normalize_filename(name):
+    if not name:
+        return None
+    return unicodedata.normalize("NFC", unquote(name)).strip()
+
+def s3_object_exists(key):
+    try:
+        response = s3.head_object(Bucket=BUCKET_NAME, Key=key)
+        return response.get("ETag", "").strip('"')
+    except s3.exceptions.ClientError as e:
+        if e.response['ResponseMetadata']['HTTPStatusCode'] == 404:
+            return None
+        raise
+
+def upload_file(local_path, s3_key):
+    try:
+        with open(local_path, 'rb') as data:
+            response = s3.put_object(
+                Bucket=BUCKET_NAME,
+                Key=s3_key,
+                Body=data
+            )
+        return response.get('ETag', '').strip('"')
+    except Exception as e:
+        logger.error(f"Error uploading {local_path}: {e}")
+        return None
+
+def get_db_urls():
+    with db.cursor() as cursor:
+        cursor.execute(f"SELECT id, url FROM {TABLE_NAME}")
+        return cursor.fetchall()
+
+def find_best_match(filename, candidates):
+    names = [normalize_filename(c['url'].split("/")[-1]) for c in candidates]
+    match = get_close_matches(normalize_filename(filename), names, n=1, cutoff=0.85)
+    if match:
+        for c in candidates:
+            if normalize_filename(c['url'].split("/")[-1]) == match[0]:
+                return c
+    return None
+
+# === SYNC ===
+def sync(args):
+    source_path = Path(SOURCE_DIR)
+    files = [f for f in source_path.iterdir() if f.is_file()]
+    total = len(files)
+    logger.info(f"Starting sync of {total} files using {args.workers} threads. Dry run: {args.dry_run}")
+
+    db_urls = get_db_urls()
+    results = {
+        "uploaded": 0,
+        "skipped": 0,
+        "updated": 0,
+        "failed": 0,
+        "missing_db": 0,
+        "fuzzy_match": 0
+    }
+
+    def process_file(file_path):
+        s3_key = f"{TARGET_PREFIX}{file_path.name}"
+        filename = file_path.name
+        clean_path = f"{TARGET_PREFIX}{filename}"
+
+        try:
+            etag = s3_object_exists(s3_key)
+            if etag:
+                logger.info(f"[SKIP] {filename} already exists in S3")
+                return ("skipped", filename)
+
+            if args.dry_run:
+                logger.info(f"[DRY RUN] Would upload {filename} to {s3_key}")
+                return ("uploaded", filename)
+
+            etag = upload_file(str(file_path), s3_key)
+            if not etag:
+                return ("failed", filename)
+
+            logger.info(f"[UPLOAD] {filename} → {s3_key} [ETag: {etag}]")
+
+            match = next((row for row in db_urls if normalize_filename(row["url"].split("/")[-1]) == normalize_filename(filename)), None)
+
+            used_fuzzy = False
+            if not match:
+                match = find_best_match(filename, db_urls)
+                used_fuzzy = True
+
+            if match:
+                if not args.dry_run:
+                    with db.cursor() as cursor:
+                        cursor.execute(
+                            f"UPDATE {TABLE_NAME} SET hcp_id = %s, path = %s, url = %s WHERE id = %s",
+                            (etag, clean_path, filename, match["id"])
+                        )
+                logger.info(f"[DB] Updated ID {match['id']} for {filename} {'(fuzzy match)' if used_fuzzy else ''}")
+                return ("fuzzy_match" if used_fuzzy else "updated", filename)
+            else:
+                logger.warning(f"[DB] No matching row found for {filename}")
+                return ("missing_db", filename)
+
+        except Exception as e:
+            logger.error(f"[ERROR] {filename} → {e}")
+            return ("failed", filename)
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(process_file, f): f for f in files}
+        for future in as_completed(futures):
+            result_type, filename = future.result()
+            results[result_type] += 1
+
+    if not args.dry_run:
+        db.commit()
+
+    logger.info("=== SYNC SUMMARY ===")
+    for k, v in results.items():
+        logger.info(f"{k.upper()}: {v}")
+
+# === MAIN ===
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Unified S3 + DB Migration & Reconciliation Tool")
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("migrate", help="Upload all files from source directory to S3")
+    sub.add_parser("reconcile-db", help="Update DB with hcp_id/path from existing S3 files")
+    sub.add_parser("find-orphans", help="Find S3 files not tracked in DB")
+    sub.add_parser("import-orphans", help="Move orphan files and insert into DB with hcp_id")
+
+    sync_parser = sub.add_parser("sync", help="Upload files and update DB in one pass")
+    sync_parser.add_argument("--dry-run", action="store_true", help="Perform a dry run (no changes)")
+    sync_parser.add_argument("--workers", type=int, default=5, help="Number of parallel threads (default: 5)")
+
+    args = parser.parse_args()
+
+    try:
+        if args.command == "migrate":
+            migrate(args)
+        elif args.command == "reconcile-db":
+            reconcile(args)
+        elif args.command == "find-orphans":
+            find_orphans(args)
+        elif args.command == "import-orphans":
+            import_orphans(args)
+        elif args.command == "sync":
+            sync(args)
+        else:
+            parser.print_help()
+    finally:
+        db.close()
+
+# === USAGE ===
+# Dry run: see what would happen
+# python script.py sync --dry-run --workers 10
+#
+# Real upload & DB update
+# python script.py sync --workers 10
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+import os
+import sys
+import csv
+import time
+import boto3
+import pymysql
+import logging
+import urllib3
+import argparse
+import unicodedata
+from pathlib import Path
+from difflib import get_close_matches
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
