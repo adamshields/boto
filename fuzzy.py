@@ -2,6 +2,298 @@
 import os
 import sys
 import csv
+import boto3
+import pymysql
+import logging
+import urllib3
+import argparse
+import unicodedata
+from pathlib import Path
+from difflib import get_close_matches
+from urllib.parse import unquote
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+# === CONFIGURATION ===
+DB_HOST = "your-mysql-host"
+DB_USER = "your-user"
+DB_PASS = "your-password"
+DB_NAME = "your-db"
+TABLE_NAME = "your-table"
+
+BUCKET_NAME = "adam"
+ENDPOINT_URL = "https://your-hcp-endpoint.com"
+ACCESS_KEY = "your-s3-access-key"
+SECRET_KEY = "your-s3-secret-key"
+
+SOURCE_DIR = "Y:/path/to/share"
+TARGET_PREFIX = "legacy/"
+
+# === LOGGING ===
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("s3tool.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# === S3 + DB ===
+s3 = boto3.client(
+    's3',
+    aws_access_key_id=ACCESS_KEY,
+    aws_secret_access_key=SECRET_KEY,
+    endpoint_url=ENDPOINT_URL,
+    verify=False
+)
+
+db = pymysql.connect(
+    host=DB_HOST,
+    user=DB_USER,
+    password=DB_PASS,
+    database=DB_NAME,
+    cursorclass=pymysql.cursors.DictCursor
+)
+
+# === HELPERS ===
+def normalize_filename(name):
+    if not name:
+        return None
+    return unicodedata.normalize("NFC", unquote(name)).strip()
+
+def s3_object_exists(key):
+    try:
+        response = s3.head_object(Bucket=BUCKET_NAME, Key=key)
+        return response.get("ETag", "").strip('"')
+    except s3.exceptions.ClientError as e:
+        if e.response['ResponseMetadata']['HTTPStatusCode'] == 404:
+            return None
+        raise
+
+def upload_file(local_path, s3_key):
+    try:
+        with open(local_path, 'rb') as data:
+            response = s3.put_object(
+                Bucket=BUCKET_NAME,
+                Key=s3_key,
+                Body=data
+            )
+        return response.get('ETag', '').strip('"')
+    except Exception as e:
+        logger.error(f"Error uploading {local_path}: {e}")
+        return None
+
+def get_db_urls():
+    with db.cursor() as cursor:
+        cursor.execute(f"SELECT id, url FROM {TABLE_NAME}")
+        return cursor.fetchall()
+
+def find_best_match(filename, candidates):
+    names = [normalize_filename(c['url'].split("/")[-1]) for c in candidates]
+    match = get_close_matches(normalize_filename(filename), names, n=1, cutoff=0.85)
+    if match:
+        for c in candidates:
+            if normalize_filename(c['url'].split("/")[-1]) == match[0]:
+                return c
+    return None
+
+# === SYNC ===
+def sync(args):
+    source_path = Path(SOURCE_DIR)
+    files = [f for f in source_path.iterdir() if f.is_file()]
+    total = len(files)
+    logger.info(f"Starting sync of {total} files using {args.workers} threads. Dry run: {args.dry_run}")
+
+    db_urls = get_db_urls()
+    results = {
+        "uploaded": 0,
+        "skipped": 0,
+        "updated": 0,
+        "failed": 0,
+        "missing_db": 0,
+        "fuzzy_match": 0
+    }
+
+    file_log = []
+
+    def safe_name(name):
+        return name.encode("utf-8", errors="replace").decode("utf-8")
+
+    def process_file(file_path):
+        filename = file_path.name
+        safe_filename = safe_name(filename)
+        s3_key = f"{TARGET_PREFIX}{filename}"
+        path_for_db = s3_key
+
+        try:
+            etag = s3_object_exists(s3_key)
+            if etag:
+                logger.info(f"[SKIP] {safe_filename} already exists in S3")
+                file_log.append({"filename": safe_filename, "action": "skipped", "etag": ""})
+                return ("skipped", safe_filename)
+
+            if args.dry_run:
+                logger.info(f"[DRY RUN] Would upload {safe_filename} to {s3_key}")
+                file_log.append({"filename": safe_filename, "action": "uploaded", "etag": ""})
+                return ("uploaded", safe_filename)
+
+            etag = upload_file(str(file_path), s3_key)
+            if not etag:
+                file_log.append({"filename": safe_filename, "action": "failed", "etag": ""})
+                return ("failed", safe_filename)
+
+            logger.info(f"[UPLOAD] {safe_filename} → {s3_key} [ETag: {etag}]")
+
+            match = next((row for row in db_urls if normalize_filename(row["url"].split("/")[-1]) == normalize_filename(filename)), None)
+            used_fuzzy = False
+
+            if not match:
+                match = find_best_match(filename, db_urls)
+                used_fuzzy = True
+
+            if match:
+                if not args.dry_run:
+                    with db.cursor() as cursor:
+                        cursor.execute(
+                            f"UPDATE {TABLE_NAME} SET hcp_id = %s, path = %s, url = %s WHERE id = %s",
+                            (etag, path_for_db, filename, match["id"])
+                        )
+                action = "fuzzy_match" if used_fuzzy else "updated"
+                file_log.append({"filename": safe_filename, "action": action, "etag": etag})
+                logger.info(f"[DB] Updated ID {match['id']} for {safe_filename} {'(fuzzy match)' if used_fuzzy else ''}")
+                return (action, safe_filename)
+            else:
+                logger.warning(f"[DB] No matching DB row for {safe_filename}")
+                file_log.append({"filename": safe_filename, "action": "missing_db", "etag": etag})
+                return ("missing_db", safe_filename)
+
+        except Exception as e:
+            logger.error(f"[ERROR] {safe_filename} → {e}")
+            file_log.append({"filename": safe_filename, "action": "failed", "etag": ""})
+            return ("failed", safe_filename)
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = {executor.submit(process_file, f): f for f in files}
+        for future in as_completed(futures):
+            result_type, filename = future.result()
+            results[result_type] += 1
+
+    if not args.dry_run:
+        db.commit()
+
+    logger.info("=== SYNC SUMMARY ===")
+    for k, v in results.items():
+        logger.info(f"{k.upper()}: {v}")
+
+    # === Write CSV logs ===
+    sync_csv = "sync_results.csv"
+    fuzzy_csv = "fuzzy_matches.csv"
+
+    with open(sync_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["filename", "action", "etag"])
+        writer.writeheader()
+        writer.writerows(file_log)
+
+    fuzzy_rows = [row for row in file_log if row["action"] == "fuzzy_match"]
+    with open(fuzzy_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["filename", "action", "etag"])
+        writer.writeheader()
+        writer.writerows(fuzzy_rows)
+
+    logger.info(f"CSV log written to {sync_csv}")
+    logger.info(f"Fuzzy matches written to {fuzzy_csv}")
+
+# === MAIN ===
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Sync S3 + DB with fuzzy match and path control")
+    sub = parser.add_subparsers(dest="command")
+
+    sync_parser = sub.add_parser("sync", help="Upload files and update DB in one pass")
+    sync_parser.add_argument("--dry-run", action="store_true", help="Perform a dry run (no changes)")
+    sync_parser.add_argument("--workers", type=int, default=5, help="Number of parallel threads (default: 5)")
+
+    args = parser.parse_args()
+
+    try:
+        if args.command == "sync":
+            sync(args)
+        else:
+            parser.print_help()
+    finally:
+        db.close()
+
+# === USAGE ===
+# Dry run test:
+#   python script.py sync --dry-run --workers 5
+#
+# Real upload + update:
+#   python script.py sync --workers 10
+#
+# Output CSV logs:
+#   - sync_results.csv : every file processed
+#   - fuzzy_matches.csv : subset with fuzzy matched DB rows
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+import os
+import sys
+import csv
 import time
 import boto3
 import pymysql
