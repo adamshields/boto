@@ -1,32 +1,46 @@
+
+```
+
+
 def finalize_bunk_urls():
     logger.info("Finalizing URLs: replacing server.example.com with bunk")
 
     with conn.cursor() as cursor:
-        cursor.execute(f"SELECT id, url FROM {TABLE_NAME} WHERE url LIKE %s", ("%server.example.com%",))
+        sql = f"SELECT id, url FROM {TABLE_NAME} WHERE url LIKE %s"
+        cursor.execute(sql, ("%server.example.com%",))
         rows = cursor.fetchall()
 
         updated = 0
+        already_bunked = 0
+        total_checked = len(rows)
+
         for row in rows:
             parsed = urllib.parse.urlparse(row["url"])
+            if parsed.netloc == "bunk":
+                already_bunked += 1
+                logger.info(f"[SKIPPED] Already bunked: {row['url']}")
+                continue
+
             new_url = parsed._replace(netloc="bunk").geturl()
 
-            if new_url != row["url"]:
-                logger.info(f"[BUNK] {row['url']} → {new_url}")
-                if not args.dry_run:
-                    cursor.execute(
-                        f"UPDATE {TABLE_NAME} SET url = %s WHERE id = %s",
-                        (new_url, row["id"])
-                    )
-                    updated += 1
+            logger.info(f"[BUNK] {row['url']} → {new_url}")
+            if not args.dry_run:
+                cursor.execute(
+                    f"UPDATE {TABLE_NAME} SET url = %s WHERE id = %s",
+                    (new_url, row["id"])
+                )
+                updated += 1
 
         if not args.dry_run:
             conn.commit()
-        logger.info(f"Finalized {updated} URLs.")
+
+        logger.info(f"Checked {total_checked} rows total")
+        logger.info(f"Skipped {already_bunked} already-bunked URLs")
+        logger.info(f"Updated {updated} URLs with new bunk domain")
 
 
 
-
-
+```
 
 
 
