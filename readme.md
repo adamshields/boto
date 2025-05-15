@@ -31,6 +31,7 @@ ORPHAN_CSV = "orphaned_s3_files.csv"
 INSERT_LOG_CSV = "imported_orphans_log.csv"
 SOURCE_DIR = "/mnt/share/legacy"
 TARGET_PREFIX = "legacy/"
+BUNK_DOMAIN = "this.was.bunk"
 
 # === CLI ARGS ===
 parser = argparse.ArgumentParser(description="HCP S3 Reconciliation Tool")
@@ -118,7 +119,10 @@ def find_orphaned_s3_files():
 
     orphaned = []
     for key in s3_keys:
-        if normalize_filename(key.lower()) not in db_paths:
+        norm_key = normalize_filename(key.lower())
+        if norm_key.endswith("/") or norm_key == PREFIX.lower():
+            continue
+        if norm_key not in db_paths:
             orphaned.append(key)
 
     logger.info(f"Found {len(orphaned)} orphaned S3 files.")
@@ -149,7 +153,7 @@ def reconcile():
 
         for row in rows:
             url = row["url"]
-            if not url or not url.lower().startswith(("https://server/artifacts/", "http://server/artifacts/")):
+            if not url or not url.lower().startswith(("https://", "http://")):
                 continue
 
             raw_filename = extract_filename_from_url(url)
@@ -179,8 +183,10 @@ def reconcile():
                     )
                     updated += 1
             else:
-                unmatched.append({"id": row["id"], "url": url, "expected_key": s3_key})
-                logger.warning(f"[MISSING] {file_name} not found → Raw: {repr(file_name)}")
+                parsed = urllib.parse.urlparse(url)
+                bunk_url = parsed._replace(netloc=BUNK_DOMAIN).geturl()
+                unmatched.append({"id": row["id"], "url": bunk_url, "expected_key": s3_key})
+                logger.warning(f"[MISSING] {file_name} not found → Rewritten URL: {bunk_url}")
 
     if not args.dry_run:
         conn.commit()
@@ -190,7 +196,6 @@ def reconcile():
             writer = csv.DictWriter(csvfile, fieldnames=["id", "url", "expected_key"])
             writer.writeheader()
             for row in unmatched:
-                row = {k: str(v).encode("utf-8", errors="replace").decode("utf-8") for k, v in row.items()}
                 writer.writerow(row)
         logger.info(f"Exported {len(unmatched)} unmatched rows to {UNMATCHED_OUTPUT}")
 
@@ -230,6 +235,10 @@ def import_orphans():
                     continue
 
                 key = normalize_filename(key_field)
+                if key.endswith("/"):
+                    logger.info(f"[SKIPPED] Skipping folder marker key: {key}")
+                    continue
+
                 filename = key.split("/")[-1]
                 new_key = f"{TARGET_PREFIX}orphan/{filename}"
 
