@@ -1,5 +1,93 @@
 
 ```
+def import_orphans():
+    if not Path(ORPHAN_CSV).exists():
+        logger.error(f"Orphan CSV not found: {ORPHAN_CSV}")
+        return
+
+    inserted = []
+    with open(ORPHAN_CSV, newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        with conn.cursor() as cursor:
+            for row in reader:
+                key_field = row.get("orphaned_s3_key") or row.get("expected_key")
+                if not key_field:
+                    continue
+
+                key = normalize_filename(key_field)
+                if key.endswith("/"):
+                    logger.info(f"[SKIPPED] Skipping folder marker key: {key}")
+                    continue
+
+                filename = key.split("/")[-1]
+                new_key = f"{TARGET_PREFIX}orphan/{filename}"
+
+                try:
+                    # Check if orphan key already exists
+                    try:
+                        existing_etag = s3_client.head_object(Bucket=BUCKET_NAME, Key=new_key).get("ETag", "").strip('"')
+                        logger.info(f"[SKIPPED COPY] {new_key} already exists in S3")
+                    except s3_client.exceptions.ClientError as e:
+                        if e.response['ResponseMetadata']['HTTPStatusCode'] == 404:
+                            logger.info(f"[COPY] {key} → {new_key}")
+                            if not args.dry_run:
+                                s3_client.copy_object(
+                                    Bucket=BUCKET_NAME,
+                                    CopySource={'Bucket': BUCKET_NAME, 'Key': key},
+                                    Key=new_key
+                                )
+                            existing_etag = s3_client.head_object(Bucket=BUCKET_NAME, Key=new_key).get("ETag", "").strip('"')
+                        else:
+                            logger.error(f"[ERROR] Unexpected error checking/copying {key}: {e}")
+                            continue
+
+                    # Delete original object if not dry run
+                    if not args.dry_run:
+                        s3_client.delete_object(Bucket=BUCKET_NAME, Key=key)
+
+                    # Insert into DB
+                    new_url = f"{ENDPOINT_URL.rstrip('/')}/{new_key}"
+                    if not args.dry_run:
+                        cursor.execute(
+                            f"INSERT INTO {TABLE_NAME} (name, url, path, hcp_id) VALUES (%s, %s, %s, %s)",
+                            (filename, new_url, new_key, existing_etag)
+                        )
+                    inserted.append({
+                        "name": filename,
+                        "path": new_key,
+                        "url": new_url,
+                        "hcp_id": existing_etag
+                    })
+
+                except Exception as e:
+                    logger.error(f"[ERROR] Failed to import orphan {key} → {e}")
+
+            if not args.dry_run:
+                conn.commit()
+
+    if inserted:
+        with open(INSERT_LOG_CSV, "w", newline='', encoding="utf-8") as out:
+            writer = csv.DictWriter(out, fieldnames=["name", "path", "url", "hcp_id"])
+            writer.writeheader()
+            for row in inserted:
+                writer.writerow(row)
+        logger.info(f"Imported {len(inserted)} orphaned files. Log written to {INSERT_LOG_CSV}")
+    else:
+        logger.info("No orphans were imported.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def finalize_bunk_urls():
