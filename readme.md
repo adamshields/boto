@@ -1,3 +1,36 @@
+def finalize_bunk_urls():
+    logger.info("Finalizing URLs: replacing server.example.com with bunk")
+
+    with conn.cursor() as cursor:
+        cursor.execute(f"SELECT id, url FROM {TABLE_NAME} WHERE url LIKE %s", ("%server.example.com%",))
+        rows = cursor.fetchall()
+
+        updated = 0
+        for row in rows:
+            parsed = urllib.parse.urlparse(row["url"])
+            new_url = parsed._replace(netloc="bunk").geturl()
+
+            if new_url != row["url"]:
+                logger.info(f"[BUNK] {row['url']} → {new_url}")
+                if not args.dry_run:
+                    cursor.execute(
+                        f"UPDATE {TABLE_NAME} SET url = %s WHERE id = %s",
+                        (new_url, row["id"])
+                    )
+                    updated += 1
+
+        if not args.dry_run:
+            conn.commit()
+        logger.info(f"Finalized {updated} URLs.")
+
+
+
+
+
+
+
+
+
 #!/usr/bin/env python3
 import boto3
 import pymysql
